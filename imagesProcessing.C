@@ -38,6 +38,138 @@ typedef struct {
     int canales;         // 1 (escala de grises) o 3 (RGB)
     unsigned char*** pixeles; // Matriz 3D: [alto][ancho][canales]
 } ImagenInfo;
+typedef struct {
+    unsigned char*** pixelelesOrigen;
+    unsigned char*** pixelesDestino;
+    float ** kernel;
+    int tamKernel;
+    int inicio;
+    int final;
+    int ancho;
+    int alto;
+    int canales;
+} ConvolucionArgs;
+
+float ** generarKernel(int tamKernel, float sigma) {
+    float** kernel = (float**)malloc(tamKernel * sizeof(float*));
+    for(int i=0; i<tamKernel; i++) {
+        kernel[i] = (float*)malloc(tamKernel * sizeof(float));
+    }
+
+    float suma = 0.0f;
+    int centro = tamKernel / 2;
+
+    for (int y=0; y < tamKernel; y++) {
+        for (int x=0; x < tamKernel; x++) {
+            int dy = y - centro;
+            int dx = x - centro;
+            kernel[y][x] = exp(-(dx*dx + dy*dy) / (2 * sigma * sigma)) / (2 * M_PI * sigma * sigma);
+            suma += kernel[y][x];
+        }
+    }
+
+    // Normalizar el kernel
+    for (int y=0; y < tamKernel; y++) {
+        for (int x=0; x < tamKernel; x++) {
+            kernel[y][x] /= suma;
+        }
+    }
+
+    return kernel;
+}
+
+void liberarKernel(float** kernel, int tamKernel) {
+    for(int i=0; i<tamKernel; i++) {
+        free(kernel[i]);
+    }
+    free(kernel);
+}
+
+void* aplicarConvolucion(void* args) {
+    ConvolucionArgs* cArgs = (ConvolucionArgs*)args;
+    int tamKernel = cArgs->tamKernel;
+    int centro = tamKernel / 2;
+
+    for (int y = cArgs->inicio; y < cArgs->final; y++) {
+        for (int x = 0; x < cArgs->ancho; x++) {
+            for (int c = 0; c < cArgs->canales; c++) {
+                float valor = 0.0f;
+                for (int ky = 0; ky < tamKernel; ky++) {
+                    for (int kx = 0; kx < tamKernel; kx++) {
+                        int imgY = y + ky - centro;
+                        int imgX = x + kx - centro;
+
+                        if (imgY >= 0 && imgY < cArgs->alto && imgX >= 0 && imgX < cArgs->ancho) {
+                            valor += cArgs->pixelelesOrigen[imgY][imgX][c] * cArgs->kernel[ky][kx];
+                        }
+                    }
+                }
+                if (valor < 0) valor = 0;
+                if (valor > 255) valor = 255;
+                cArgs->pixelesDestino[y][x][c] = (unsigned char)(valor);
+            }
+        }
+    }
+    return NULL; // ← Soluciona el warning
+}
+
+void aplicarDesenfoque(ImagenInfo* info, int numHilos, int tamKernel, float sigma) {
+    if (!info->pixeles) {
+        printf("No hay imagen cargada para procesar.\n");
+        return;
+    }
+
+    printf("Aplicando desenfoque con kernel %dx%d y sigma %.2f usando %d hilos...\n", tamKernel, tamKernel, sigma, numHilos);
+
+    float** kernel = generarKernel(tamKernel, sigma);
+    unsigned char*** pixelesDestino = (unsigned char***)malloc(info->alto * sizeof(unsigned char**));
+    for (int y = 0; y < info->alto; y++) {
+        pixelesDestino[y] = (unsigned char**)malloc(info->ancho * sizeof(unsigned char*));
+        for (int x = 0; x < info->ancho; x++) {
+            pixelesDestino[y][x] = (unsigned char*)malloc(info->canales * sizeof(unsigned char));
+        }
+    }
+
+    pthread_t hilos[numHilos];
+    ConvolucionArgs args[numHilos];
+    int filasPorHilo = info->alto / numHilos;
+    for (int i = 0; i < numHilos; i++) {
+        args[i].pixelelesOrigen = info->pixeles;
+        args[i].pixelesDestino = pixelesDestino;
+        args[i].kernel = kernel;
+        args[i].tamKernel = tamKernel;
+        args[i].inicio = i * filasPorHilo;
+        args[i].final = (i == numHilos - 1) ? info->alto : (i + 1) * filasPorHilo;
+        args[i].ancho = info->ancho;
+        args[i].alto = info->alto;
+        args[i].canales = info->canales;
+        pthread_create(&hilos[i], NULL, aplicarConvolucion, &args[i]);
+    }
+
+    for (int i = 0; i < numHilos; i++) {
+        pthread_join(hilos[i], NULL);
+    }
+
+    for (int y = 0; y < info->alto; y++) {
+        for (int x = 0; x < info->ancho; x++) {
+            for (int c = 0; c < info->canales; c++) {
+                info->pixeles[y][x][c] = pixelesDestino[y][x][c];
+            }
+        }
+    }
+
+    for (int y = 0; y < info->alto; y++) {
+        for (int x = 0; x < info->ancho; x++) {
+            free(pixelesDestino[y][x]);
+        }
+        free(pixelesDestino[y]);
+    }
+    free(pixelesDestino);
+
+    liberarKernel(kernel, tamKernel);
+    printf("Desenfoque aplicado.\n");
+}
+
 
 // QUÉ: Liberar memoria asignada para la imagen.
 // CÓMO: Libera cada fila y canal de la matriz 3D, luego el arreglo de filas y
@@ -258,7 +390,8 @@ void mostrarMenu() {
     printf("2. Mostrar matriz de píxeles\n");
     printf("3. Guardar como PNG\n");
     printf("4. Ajustar brillo (+/- valor) concurrentemente\n");
-    printf("5. Salir\n");
+    printf("5. Aplicar desenfoque Gaussiano concurrentemente\n");
+    printf("6. Salir\n");
     printf("Opción: ");
 }
 
@@ -332,7 +465,27 @@ int main(int argc, char* argv[]) {
                 ajustarBrilloConcurrente(&imagen, delta);
                 break;
             }
-            case 5: // Salir
+            case 5: {
+                int tamKernel;
+                float sigma;
+                printf("Tamaño del kernel (debe ser impar, e.g., 3, 5): ");
+                if (scanf("%d", &tamKernel) != 1 || tamKernel < 3 || tamKernel % 2 == 0) {
+                    while (getchar() != '\n');
+                    printf("Entrada inválida.\n");
+                    continue;
+                }
+                while (getchar() != '\n');
+                printf("Sigma (desviación estándar, e.g., 1.0): ");
+                if (scanf("%f", &sigma) != 1 || sigma <= 0) {
+                    while (getchar() != '\n');
+                    printf("Entrada inválida.\n");
+                    continue;
+                }
+                while (getchar() != '\n');
+                aplicarDesenfoque(&imagen, 2, tamKernel, sigma);
+                break;
+            }
+            case 6: // Salir
                 liberarImagen(&imagen);
                 printf("¡Adiós!\n");
                 return EXIT_SUCCESS;
@@ -342,3 +495,4 @@ int main(int argc, char* argv[]) {
     }
     liberarImagen(&imagen);
     return EXIT_SUCCESS;
+}
