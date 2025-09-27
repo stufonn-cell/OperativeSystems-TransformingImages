@@ -52,6 +52,17 @@ typedef struct {
   int canales;
 } ConvolucionArgs;
 
+// QUÉ: Número global de hilos para operaciones concurrentes.
+static int GLOBAL_NUM_THREADS = 2;
+
+typedef struct {
+    ImagenInfo* imagenOriginal;
+    ImagenInfo* imagenRotada;
+    double angleDegrees;
+    int inicioY;
+    int finalY;
+} RotationArgs;
+
 // QUÉ: Liberar memoria asignada para la imagen.
 // CÓMO: Libera cada fila y canal de la matriz 3D, luego el arreglo de filas y
 // reinicia la estructura.
@@ -275,42 +286,47 @@ int allocateRotatedImage(ImagenInfo *originalInfo, ImagenInfo *rotatedInfo,
   return 1; // Success
 }
 
-void rotacion(ImagenInfo *originalInfo, ImagenInfo *rotatedInfo, float angulo) {
-
-  // Calculate center points
-  double originalCenterX = originalInfo->ancho / 2.0;
-  double originalCenterY = originalInfo->alto / 2.0;
-  double newCenterX = rotatedInfo->ancho / 2.0;
-  double newCenterY = rotatedInfo->alto / 2.0;
-
-  for (int newY = 0; newY < rotatedInfo->alto; newY++) {
-    for (int newX = 0; newX < rotatedInfo->ancho; newX++) {
-      // Translate to center
-      double translatedX = newX - newCenterX;
-      double translatedY = newY - newCenterY;
-
-      // Apply inverse rotation
-      double originalX = translatedX * cos(angulo) + translatedY * sin(angulo) +
-                         originalCenterX;
-      double originalY = -translatedX * sin(angulo) +
-                         translatedY * cos(angulo) + originalCenterY;
-
-      // Check if the source pixel is within bounds
-      int srcX = (int)round(originalX);
-      int srcY = (int)round(originalY);
-
-      if (srcX >= 0 && srcX < originalInfo->ancho && srcY >= 0 &&
-          srcY < originalInfo->alto) {
-        // Copy all channels
-        for (int c = 0; c < originalInfo->canales; c++) {
-          rotatedInfo->pixeles[newY][newX][c] =
-              originalInfo->pixeles[srcY][srcX][c];
+void* rotacionHilo(void* args) {
+    RotationArgs* rArgs = (RotationArgs*)args;
+    
+    double angleRad = rArgs->angleDegrees * M_PI / 180.0;
+    double cosAngle = cos(angleRad);
+    double sinAngle = sin(angleRad);
+    
+    // Calculate center points
+    double originalCenterX = rArgs->imagenOriginal->ancho / 2.0;
+    double originalCenterY = rArgs->imagenOriginal->alto / 2.0;
+    double newCenterX = rArgs->imagenRotada->ancho / 2.0;
+    double newCenterY = rArgs->imagenRotada->alto / 2.0;
+    
+    // Process assigned rows
+    for (int newY = rArgs->inicioY; newY < rArgs->finalY; newY++) {
+        for (int newX = 0; newX < rArgs->imagenRotada->ancho; newX++) {
+            // Translate to center
+            double translatedX = newX - newCenterX;
+            double translatedY = newY - newCenterY;
+            
+            // Apply inverse rotation
+            double originalX = translatedX * cosAngle + translatedY * sinAngle + originalCenterX;
+            double originalY = -translatedX * sinAngle + translatedY * cosAngle + originalCenterY;
+            
+            // Check if the source pixel is within bounds
+            int srcX = (int)round(originalX);
+            int srcY = (int)round(originalY);
+            
+            if (srcX >= 0 && srcX < rArgs->imagenOriginal->ancho && 
+                srcY >= 0 && srcY < rArgs->imagenOriginal->alto) {
+                // Copy all channels
+                for (int c = 0; c < rArgs->imagenOriginal->canales; c++) {
+                    rArgs->imagenRotada->pixeles[newY][newX][c] = 
+                        rArgs->imagenOriginal->pixeles[srcY][srcX][c];
+                }
+            }
+            // If outside bounds, keep the initialized background color (already set to 0)
         }
-      }
-      // If outside bounds, keep the initialized background color (already set
-      // to 0)
     }
-  }
+    
+    return NULL;
 }
 
 // QUÉ: Rota la imagen en un ángulo dado (e.g., 90°, 180°, 270° o arbitrario).
@@ -336,13 +352,40 @@ void rotarImagen(ImagenInfo *info, float angulo) {
     return;
   }
 
-  rotacion(info, &rotatedInfo, angulo);
+  // QUÉ: Usar múltiples hilos para acelerar la rotación.
+  // CÓMO: Divide las filas de la imagen rotada entre GLOBAL_NUM_THREADS hilos.
+  // POR QUÉ: Paralelizar mejora el rendimiento en imágenes grandes.
+  pthread_t hilos[GLOBAL_NUM_THREADS];
+  RotationArgs args[GLOBAL_NUM_THREADS];
+  int filasPorHilo = (int)ceil((double)rotatedInfo.alto / GLOBAL_NUM_THREADS);
+
+  printf("Rotando imagen usando %d hilos...\n", GLOBAL_NUM_THREADS);
+
+  // Crear y lanzar hilos
+  for (int i = 0; i < GLOBAL_NUM_THREADS; i++) {
+    args[i].imagenOriginal = info;
+    args[i].imagenRotada = &rotatedInfo;
+    args[i].angleDegrees = angulo;
+    args[i].inicioY = i * filasPorHilo;
+    args[i].finalY = (i == GLOBAL_NUM_THREADS - 1) ? rotatedInfo.alto : (i + 1) * filasPorHilo;
+
+    if (pthread_create(&hilos[i], NULL, rotacionHilo, &args[i]) != 0) {
+      fprintf(stderr, "Error al crear hilo %d para rotación\n", i);
+      break;
+    }
+  }
+
+  // Esperar a que todos los hilos terminen
+  for (int i = 0; i < GLOBAL_NUM_THREADS; i++) {
+    pthread_join(hilos[i], NULL);
+  }
+
   // Replace original image with rotated image
   liberarImagen(info);
   *info = rotatedInfo;
 
-  printf("Image rotated by %.1f degrees. New dimensions: %dx%d\n", angulo,
-         info->ancho, info->alto);
+  printf("Imagen rotada %.1f grados usando %d hilos. Nuevas dimensiones: %dx%d\n", 
+         angulo, GLOBAL_NUM_THREADS, info->ancho, info->alto);
 }
 
 // QUÉ: Liberar memoria asignada para la imagen.
@@ -685,6 +728,7 @@ int main(int argc, char *argv[]) {
 
       rotarImagen(&imagen, angulo);
       break;
+      
 
     case 7: // Salir
       liberarImagen(&imagen);
