@@ -63,6 +63,13 @@ typedef struct {
     int finalY;
 } RotationArgs;
 
+typedef struct {
+    ImagenInfo* imagenOriginal;
+    ImagenInfo* imagenBordes;
+    int inicioY;
+    int finalY;
+} SobelArgs;
+
 // QUÉ: Liberar memoria asignada para la imagen.
 // CÓMO: Libera cada fila y canal de la matriz 3D, luego el arreglo de filas y
 // reinicia la estructura.
@@ -599,6 +606,134 @@ void ajustarBrilloConcurrente(ImagenInfo *info, int delta) {
          info->canales == 1 ? "grises" : "RGB");
 }
 
+void* aplicarSobelHilo(void* arg) {
+    SobelArgs* args = (SobelArgs*)arg;
+    ImagenInfo* src = args->imagenOriginal;
+    ImagenInfo* dst = args->imagenBordes;
+    int ancho = src->ancho;
+    int canales = src->canales;
+    int Gx[3][3] = {
+        {-1, 0, 1},
+        {-2, 0, 2},
+        {-1, 0, 1}
+    };
+    int Gy[3][3] = {
+        {-1, -2, -1},
+        { 0,  0,  0},
+        { 1,  2,  1}
+    };
+    for (int y = args->inicioY; y < args->finalY; y++) {
+        for (int x = 1; x < ancho - 1; x++) {
+            int gx = 0, gy = 0;
+            for (int ky = -1; ky <= 1; ky++) {
+                for (int kx = -1; kx <= 1; kx++) {
+                    int pixel;
+                    if (canales == 1) {
+                        pixel = src->pixeles[y + ky][x + kx][0];
+                    } else {
+                        pixel = (src->pixeles[y + ky][x + kx][0] + src->pixeles[y + ky][x + kx][1] + src->pixeles[y + ky][x + kx][2]) / 3;
+                    }
+                    gx += pixel * Gx[ky + 1][kx + 1];
+                    gy += pixel * Gy[ky + 1][kx + 1];
+                }
+            }
+            int mag = (int)sqrt(gx * gx + gy * gy);
+            if (mag > 255) mag = 255;
+            if (mag < 0) mag = 0;
+            dst->pixeles[y][x][0] = (unsigned char)mag;
+            if (dst->canales == 3) {
+                dst->pixeles[y][x][1] = (unsigned char)mag;
+                dst->pixeles[y][x][2] = (unsigned char)mag;
+            }
+        }
+    }
+    return NULL;
+}
+
+void detectarBordes(ImagenInfo* imagen) {
+    if (!imagen || !imagen->pixeles) {
+        printf("No hay imagen cargada.\n");
+        return;
+    }
+  ImagenInfo bordes;
+  bordes.ancho = imagen->ancho;
+  bordes.alto = imagen->alto;
+  bordes.canales = 1;
+  bordes.pixeles = (unsigned char***)malloc(bordes.alto * sizeof(unsigned char**));
+  if (!bordes.pixeles) {
+    fprintf(stderr, "Error: Memoria insuficiente para matriz de bordes.\n");
+    return;
+  }
+  for (int y = 0; y < bordes.alto; y++) {
+    bordes.pixeles[y] = (unsigned char**)malloc(bordes.ancho * sizeof(unsigned char*));
+    if (!bordes.pixeles[y]) {
+      fprintf(stderr, "Error: Memoria insuficiente para fila de bordes.\n");
+      // Liberar lo que se haya asignado
+      for (int k = 0; k < y; k++) {
+        for (int x = 0; x < bordes.ancho; x++) free(bordes.pixeles[k][x]);
+        free(bordes.pixeles[k]);
+      }
+      free(bordes.pixeles);
+      return;
+    }
+    for (int x = 0; x < bordes.ancho; x++) {
+      bordes.pixeles[y][x] = (unsigned char*)malloc(sizeof(unsigned char));
+      if (!bordes.pixeles[y][x]) {
+        fprintf(stderr, "Error: Memoria insuficiente para píxel de bordes.\n");
+        // Liberar lo que se haya asignado
+        for (int k = 0; k <= y; k++) {
+          int maxX = (k == y) ? x : bordes.ancho;
+          for (int j = 0; j < maxX; j++) free(bordes.pixeles[k][j]);
+          free(bordes.pixeles[k]);
+        }
+        free(bordes.pixeles);
+        return;
+      }
+      bordes.pixeles[y][x][0] = 0;
+    }
+  }
+
+  int numHilos;
+  printf("¿Cuántos hilos deseas usar para Sobel? (2-8): ");
+  if (scanf("%d", &numHilos) != 1 || numHilos < 2 || numHilos > 8) {
+    printf("Número inválido, usando %d hilos por defecto.\n", GLOBAL_NUM_THREADS);
+    numHilos = GLOBAL_NUM_THREADS;
+  }
+  while (getchar() != '\n'); // Limpiar buffer
+
+  pthread_t hilos[numHilos];
+  SobelArgs args[numHilos];
+  int filasPorHilo = bordes.alto / numHilos;
+  int errorHilo = 0;
+  for (int i = 0; i < numHilos; i++) {
+    args[i].imagenOriginal = imagen;
+    args[i].imagenBordes = &bordes;
+    args[i].inicioY = i * filasPorHilo;
+    args[i].finalY = (i == numHilos - 1) ? bordes.alto : (i + 1) * filasPorHilo;
+    if (args[i].inicioY == 0) args[i].inicioY = 1;
+    if (args[i].finalY == bordes.alto) args[i].finalY = bordes.alto - 1;
+    if (pthread_create(&hilos[i], NULL, aplicarSobelHilo, &args[i]) != 0) {
+      fprintf(stderr, "Error al crear hilo %d\n", i);
+      errorHilo = 1;
+    }
+  }
+  for (int i = 0; i < numHilos; i++) {
+    if (pthread_join(hilos[i], NULL) != 0) {
+      fprintf(stderr, "Error al esperar hilo %d\n", i);
+      errorHilo = 1;
+    }
+  }
+  if (errorHilo) {
+    printf("Advertencia: Hubo errores en la concurrencia, el resultado puede no ser óptimo.\n");
+  }
+  printf("Bordes detectados. Puedes guardar la imagen resultante.\n");
+  liberarImagen(imagen);
+  imagen->ancho = bordes.ancho;
+  imagen->alto = bordes.alto;
+  imagen->canales = 1;
+  imagen->pixeles = bordes.pixeles;
+}
+
 // QUÉ: Mostrar el menú interactivo.
 // CÓMO: Imprime opciones y espera entrada del usuario.
 // POR QUÉ: Proporciona una interfaz simple para interactuar con el programa.
@@ -610,7 +745,8 @@ void mostrarMenu() {
   printf("4. Ajustar brillo (+/- valor) concurrentemente\n");
   printf("5. Aplicar desenfoque Gaussiano concurrentemente\n");
   printf("6. Rotar Imagen\n");
-  printf("7. Salir\n");
+  printf("7. Encontrar bordes\n");
+  printf("8. Salir\n");
   printf("Opción: ");
 }
 
@@ -729,8 +865,11 @@ int main(int argc, char *argv[]) {
       rotarImagen(&imagen, angulo);
       break;
       
+    case 7: // Encontrar bordes
+      detectarBordes(&imagen);
+      break;
 
-    case 7: // Salir
+    case 8: // Salir
       liberarImagen(&imagen);
       printf("¡Adiós!\n");
       return EXIT_SUCCESS;
@@ -741,3 +880,4 @@ int main(int argc, char *argv[]) {
   liberarImagen(&imagen);
   return EXIT_SUCCESS;
 }
+
