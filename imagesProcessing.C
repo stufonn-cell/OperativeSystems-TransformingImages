@@ -801,23 +801,15 @@ void detectarBordes(ImagenInfo* imagen) {
     }
   }
 
-  int numHilos;
-  printf("¿Cuántos hilos deseas usar para Sobel? (2-8): ");
-  if (scanf("%d", &numHilos) != 1 || numHilos < 2 || numHilos > 8) {
-    printf("Número inválido, usando %d hilos por defecto.\n", GLOBAL_NUM_THREADS);
-    numHilos = GLOBAL_NUM_THREADS;
-  }
-  while (getchar() != '\n'); // Limpiar buffer
-
-  pthread_t hilos[numHilos];
-  SobelArgs args[numHilos];
-  int filasPorHilo = bordes.alto / numHilos;
+  pthread_t hilos[GLOBAL_NUM_THREADS];
+  SobelArgs args[GLOBAL_NUM_THREADS];
+  int filasPorHilo = bordes.alto / GLOBAL_NUM_THREADS;
   int errorHilo = 0;
-  for (int i = 0; i < numHilos; i++) {
+  for (int i = 0; i < GLOBAL_NUM_THREADS; i++) {
     args[i].imagenOriginal = imagen;
     args[i].imagenBordes = &bordes;
     args[i].inicioY = i * filasPorHilo;
-    args[i].finalY = (i == numHilos - 1) ? bordes.alto : (i + 1) * filasPorHilo;
+    args[i].finalY = (i == GLOBAL_NUM_THREADS - 1) ? bordes.alto : (i + 1) * filasPorHilo;
     if (args[i].inicioY == 0) args[i].inicioY = 1;
     if (args[i].finalY == bordes.alto) args[i].finalY = bordes.alto - 1;
     if (pthread_create(&hilos[i], NULL, aplicarSobelHilo, &args[i]) != 0) {
@@ -825,7 +817,7 @@ void detectarBordes(ImagenInfo* imagen) {
       errorHilo = 1;
     }
   }
-  for (int i = 0; i < numHilos; i++) {
+  for (int i = 0; i < GLOBAL_NUM_THREADS; i++) {
     if (pthread_join(hilos[i], NULL) != 0) {
       fprintf(stderr, "Error al esperar hilo %d\n", i);
       errorHilo = 1;
@@ -854,7 +846,8 @@ void mostrarMenu() {
   printf("5. Aplicar desenfoque Gaussiano concurrentemente\n");
   printf("6. Rotar Imagen\n");
   printf("7. Encontrar bordes\n");
-  printf("8. Salir\n");
+  printf("8. Escalar Imagen\n");
+  printf("9. Salir\n");
   printf("Opción: ");
 }
 
@@ -974,6 +967,13 @@ int main(int argc, char *argv[]) {
       break;
       
     case 7: // Encontrar bordes
+      printf("¿Cuántos hilos deseas usar para Sobel?");
+      if (scanf("%d", &GLOBAL_NUM_THREADS) != 1 || GLOBAL_NUM_THREADS < 1) {
+          while (getchar() != '\n');
+          printf("Entrada inválida.\n");
+          continue;
+      }
+
       detectarBordes(&imagen);
       break;
 
@@ -983,22 +983,19 @@ int main(int argc, char *argv[]) {
       printf("Ingresa una escala ej: 1.5 \n");
 
       if (scanf("%f", &escala) != 1 || escala < 0) {
-        while (getchar() != '\n')
-          ;
+        while (getchar() != '\n');
         printf("Entrada inválida.\n");
         continue;
       }
 
       printf("Ingresa los hilos a utilizar, ej: 4 \n");
       if (scanf("%d", &GLOBAL_NUM_THREADS) != 1 || GLOBAL_NUM_THREADS < 1) {
-        while (getchar() != '\n')
-          ;
+        while (getchar() != '\n');
         printf("Entrada inválida.\n");
         continue;
       }
     
-      while (getchar() != '\n')
-        ;
+      while (getchar() != '\n');
 
       escalarImagen(&imagen, escala);
       break;
