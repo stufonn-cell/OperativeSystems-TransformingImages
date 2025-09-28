@@ -63,6 +63,14 @@ typedef struct {
     int finalY;
 } RotationArgs;
 
+typedef struct {
+    ImagenInfo* info;
+    ImagenInfo* imagenInter;
+    float escala;
+    int inicioY;
+    int finalY;
+} InterpolacionArgs;
+
 // QUÉ: Liberar memoria asignada para la imagen.
 // CÓMO: Libera cada fila y canal de la matriz 3D, luego el arreglo de filas y
 // reinicia la estructura.
@@ -386,6 +394,106 @@ void rotarImagen(ImagenInfo *info, float angulo) {
 
   printf("Imagen rotada %.1f grados usando %d hilos. Nuevas dimensiones: %dx%d\n", 
          angulo, GLOBAL_NUM_THREADS, info->ancho, info->alto);
+}
+
+void *interpolarHilo(void *hiloArgs) {
+
+    InterpolacionArgs* args = (InterpolacionArgs*)hiloArgs;
+
+    // Cada hilo procesa solo un rango de filas (inicioY a finalY)
+    for (int y = args->inicioY; y < args->finalY; y++) {
+        for (int x = 0; x < args->imagenInter->ancho; x++) {
+
+            // Obtiene los pixeles originales de la imagen fuente
+            float srcX = x / args->escala;
+            float srcY = y / args->escala;
+
+            // Coordenadas de los píxeles vecinos
+            int x1 = (int)srcX;
+            int y1 = (int)srcY;
+            int x2 = (x1 + 1 < args->info->ancho) ? x1 + 1 : x1;
+            int y2 = (y1 + 1 < args->info->alto) ? y1 + 1 : y1;
+
+            // Pesos para interpolación bilineal
+            float dx = srcX - x1;
+            float dy = srcY - y1;
+
+            for (int c = 0; c < args->info->canales; c++) {
+                // Interpolación bilineal
+                float valor =
+                    (1 - dx) * (1 - dy) * args->info->pixeles[y1][x1][c] +
+                    dx * (1 - dy) * args->info->pixeles[y1][x2][c] +
+                    (1 - dx) * dy * args->info->pixeles[y2][x1][c] +
+                    dx * dy * args->info->pixeles[y2][x2][c];
+                if (valor < 0)
+                valor = 0;
+                if (valor > 255)
+                valor = 255;
+                args->imagenInter->pixeles[y][x][c] = (unsigned char)valor;
+            }
+        }
+    }
+    return NULL; // Retorno requerido para pthread
+}
+
+void interpolarImagen (ImagenInfo *info, ImagenInfo *imagenInter, float escala) {
+    if (!info->pixeles) {
+        printf("No image loaded to interpolate.\n");
+        return;
+    }
+
+    imagenInter->ancho = (int)(info->ancho * escala);
+    imagenInter->alto = (int)(info->alto * escala);
+    imagenInter->canales = info->canales;
+
+    // Allocate memory for interpolated image
+    imagenInter->pixeles =
+        (unsigned char ***)malloc(imagenInter->alto * sizeof(unsigned char **));
+    for (int y = 0; y < imagenInter->alto; y++) {
+        imagenInter->pixeles[y] =
+            (unsigned char **)malloc(imagenInter->ancho * sizeof(unsigned char *));
+        for (int x = 0; x < imagenInter->ancho; x++) {
+        imagenInter->pixeles[y][x] =
+            (unsigned char *)malloc(imagenInter->canales * sizeof(unsigned char));
+        }
+    }
+
+    pthread_t hilos[GLOBAL_NUM_THREADS];
+    InterpolacionArgs args[GLOBAL_NUM_THREADS];
+    
+    // Distribuir filas entre hilos
+    int filasPorHilo = imagenInter->alto / GLOBAL_NUM_THREADS;
+
+    for (int i = 0; i < GLOBAL_NUM_THREADS; i++) {
+        args[i].info = info;
+        args[i].imagenInter = imagenInter;
+        args[i].escala = escala;
+        args[i].inicioY = i * filasPorHilo;
+        args[i].finalY = (i == GLOBAL_NUM_THREADS - 1) ? imagenInter->alto : (i + 1) * filasPorHilo;
+
+        pthread_create(&hilos[i], NULL, interpolarHilo, &args[i]);
+    }
+    
+    // Esperar a que terminen todos los hilos
+    for (int i = 0; i < GLOBAL_NUM_THREADS; i++) {
+        pthread_join(hilos[i], NULL);
+    }
+}
+
+void escalarImagen(ImagenInfo *info, float escala) {
+  if (escala <= 0) {
+    printf("Escala debe ser mayor que 0.\n");
+    return;
+  }
+
+  ImagenInfo imagenInter = {0};
+  interpolarImagen(info, &imagenInter, escala);
+
+  liberarImagen(info);
+  *info = imagenInter;
+
+  printf("Imagen escalada por un factor de %.2f. Nuevas dimensiones: %dx%d\n",
+         escala, info->ancho, info->alto);
 }
 
 // QUÉ: Liberar memoria asignada para la imagen.
@@ -728,9 +836,34 @@ int main(int argc, char *argv[]) {
 
       rotarImagen(&imagen, angulo);
       break;
-      
 
-    case 7: // Salir
+    case 8:
+      float escala;
+
+      printf("Ingresa una escala ej: 1.5 \n");
+
+      if (scanf("%f", &escala) != 1 || escala < 0) {
+        while (getchar() != '\n')
+          ;
+        printf("Entrada inválida.\n");
+        continue;
+      }
+
+      printf("Ingresa los hilos a utilizar, ej: 4 \n");
+      if (scanf("%d", &GLOBAL_NUM_THREADS) != 1 || GLOBAL_NUM_THREADS < 1) {
+        while (getchar() != '\n')
+          ;
+        printf("Entrada inválida.\n");
+        continue;
+      }
+    
+      while (getchar() != '\n')
+        ;
+
+      escalarImagen(&imagen, escala);
+      break;
+
+    case 9: // Salir
       liberarImagen(&imagen);
       printf("¡Adiós!\n");
       return EXIT_SUCCESS;
