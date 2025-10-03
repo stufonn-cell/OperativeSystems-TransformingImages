@@ -32,13 +32,8 @@ gcc -o img imagesProcessing.C -pthread -lm
 ./img
 ```
 
-### Cargar una imagen directamente
-```
-./img ruta/a/imagen.png
-```
 
-Sigue las instrucciones del menú para aplicar operaciones como ajuste de brillo o desenfoque gaussiano.
-
+Sigue las instrucciones del menu para aplicar los métodos.
 
 ## Integrantes del grupo
 
